@@ -143,6 +143,27 @@ func main() {
     lmt.SetHeaderEntryExpirationTTL(time.Hour)
     ```
 
+    Token buckets are also bounded in number, because their keys come from
+    client-controlled input (forwarding headers, request paths). The default cap
+    is `limiter.DefaultMaxTokenBuckets` (100,000 buckets, roughly 24 MB per
+    limiter). When the cap is exceeded the least recently used bucket is evicted
+    immediately, while a bucket that is still receiving traffic keeps its place
+    and its token state. Eviction by capacity is therefore independent of TTL:
+    a full cache evicts even unexpired buckets, whereas expired buckets linger
+    until `DeleteExpiredTokenBuckets` sweeps them (there is no background
+    sweeper).
+
+    ```go
+    // Tighten the cap, e.g. for a limiter that is expected to see few keys.
+    lmt = tollbooth.NewLimiter(1, &limiter.ExpirableOptions{MaxTokenBuckets: 10_000})
+
+    // Opt out of the bound entirely (previous, unlimited behavior).
+    lmt = tollbooth.NewLimiter(1, &limiter.ExpirableOptions{MaxTokenBuckets: -1})
+
+    // Reclaim buckets whose TTL has elapsed.
+    lmt.DeleteExpiredTokenBuckets()
+    ```
+
 4. Upon rejection, the following HTTP response headers are available to users:
 
     * `X-Rate-Limit-Limit` The maximum request limit.

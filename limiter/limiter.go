@@ -35,7 +35,25 @@ func New(generalExpirableOptions *ExpirableOptions) *Limiter {
 		lmt.generalExpirableOptions.DefaultExpirationTTL = 87600 * time.Hour
 	}
 
-	lmt.tokenBuckets = cache.NewCache[string, *rate.Limiter]().WithTTL(lmt.generalExpirableOptions.DefaultExpirationTTL)
+	// Token buckets are keyed by client-supplied data, so the cache must have an
+	// upper bound; otherwise a rotating key becomes a memory-exhaustion vector.
+	// Eviction is LRU rather than the cache's default LRC (oldest-created first),
+	// so that a key which is still receiving traffic is not evicted while idle
+	// keys created earlier stay resident.
+	maxTokenBuckets := lmt.generalExpirableOptions.MaxTokenBuckets
+	if maxTokenBuckets == 0 {
+		maxTokenBuckets = DefaultMaxTokenBuckets
+	}
+	if maxTokenBuckets < 0 {
+		// Explicit opt-out: unlimited, as in previous versions.
+		maxTokenBuckets = 0
+	}
+	lmt.maxTokenBuckets = maxTokenBuckets
+
+	lmt.tokenBuckets = cache.NewCache[string, *rate.Limiter]().
+		WithTTL(lmt.generalExpirableOptions.DefaultExpirationTTL).
+		WithMaxKeys(maxTokenBuckets).
+		WithLRU()
 
 	lmt.basicAuthUsers = cache.NewCache[string, bool]().WithTTL(lmt.generalExpirableOptions.DefaultExpirationTTL)
 
@@ -103,6 +121,9 @@ type Limiter struct {
 	// Map of limiters with TTL
 	tokenBuckets cache.Cache[string, *rate.Limiter]
 
+	// Upper bound on entries in tokenBuckets. 0 means unlimited.
+	maxTokenBuckets int
+
 	// Ignore URL on the rate limiter keys
 	ignoreURL bool
 
@@ -112,6 +133,14 @@ type Limiter struct {
 	contextEntryExpirationTTL time.Duration
 
 	sync.RWMutex
+}
+
+// GetMaxTokenBuckets returns the upper bound on the number of cached per-key
+// token buckets. A value of 0 means the cache is unbounded.
+func (l *Limiter) GetMaxTokenBuckets() int {
+	l.RLock()
+	defer l.RUnlock()
+	return l.maxTokenBuckets
 }
 
 // SetTokenBucketExpirationTTL is thread-safe way of setting custom token bucket expiration TTL.
